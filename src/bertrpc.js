@@ -15,204 +15,165 @@
 // TODO cast
 
 var sys = require('sys'),
+    events = require('events'),
     tcp = require('tcp'),
     bert = require('./bert');
 
-var bytes_to_int = bert.bytes_to_int,
-    int_to_bytes = bert.int_to_bytes,
-    t = bert.tuple,
-    a = bert.atom,
-    _reply = a('reply');
+// Client
 
-// exposed modules go here.
-var modules = {};
+function Client(port, host, callback) {
+  var self = this;
 
-var BERTRPC = {
+  this.connection = tcp.createConnection(port, host);
+  this.callbacks = [];
+  this.connection.setEncoding('binary');
+  this.reader = new Reader(function(size, term) {
+    var callback = self.callbacks.shift();
+    var reply = term[0];
+    var value = term[1];
+    callback(value);
+  });
 
-   /* BERT-RPC SERVER IMPLEMENTATION */
+  this.connection.addListener('connect', function() {
+    callback(self);
+  });
 
-   // Direct access to the modules dictionary.
-   modules: modules,
+  this.connection.addListener('end', function() {
+    self.emit('end');
+  });
 
-   // Expose all functions in object under the given BERTPRPC module
-   // name. This should be called before bertrpc.listen.
-   expose: function (mod, object) {
-      var funs = [];
-      for (var fun in object) {
-         if (typeof(object[fun]) == 'function')
-            funs.push(fun);
-      }
-      BERTRPC.trace("SERVER", "<--", "exposing: "+mod+" [funs: "+funs.join(", ")+"]");
+  this.connection.addListener('data', function(data) {
+    self.reader.read(data);
+  });
+};
+sys.inherits(Client, process.EventEmitter);
 
-      modules[mod] = object;
-      return object;
-   },
-
-   // Begin listing on the port and host specified.
-   listen: function (port, host) {
-      BERTRPC.server.listen(port, host);
-   },
-
-   // Dispatch a call or cast on an exposed module function. This is
-   // called by the server when new requests are received.
-   //    type: 'call' or 'cast'
-   //      mod: the name of a module registered with BERTRPC.expose;
-   //      fun: the name of a function defined on the module.
-   //    args: arguments to fun, as an array.
-   dispatch: function (type, mod, fun, args) {
-      if (mod = modules[mod]) {
-         if (fun = mod[fun]) {
-            if (fun.apply)
-               return fun.apply(mod, args);
-            else
-               throw 'no such fun';
-         }
-         else { throw 'no such fun' }
-      }
-      else { throw 'no such module' }
-   },
-
-   // Write a message to the console/log.
-   trace: function (side, direction, message) {
-      sys.puts("  " + direction + "   [" + side + "] " + message);
-   },
-
-   // The node tcp.Server object -- ready to go. Use BERTRPC.listen
-   // if you just want to start a server.
-   server: tcp.createServer(function (socket) {
-      var trace = BERTRPC.trace;
-      socket.setEncoding("binary");
-
-      socket.addListener("connect", function () {
-         trace("SERVER", "-->", "connect") });
-
-      socket.addListener("eof", function () {
-         trace("SERVER", "-->", "eof");
-         socket.close();
-         trace("SERVER", "<--", "close");
-      });
-
-      // read BERPs off the wire and dispatch.
-      BERTRPC.read(socket, function (size, term) {
-         trace("SERVER", "-->", "" + size + ": " + bert.repr(term));
-
-         // dispatch call to module handler
-         var type = term[0].toString(),
-              mod = term[1].toString(),
-              fun = term[2].toString(),
-             args = term[3];
-
-         var res = BERTRPC.dispatch(type, mod, fun, args);
-
-         // encode and throw back over the wire
-         var reply = t(_reply, res);
-         var len = BERTRPC.write(socket, reply);
-         trace("SERVER", "<--", "" + len + ": " + bert.repr(reply));
-      });
-   }),
-
-   // Connect to a remote BERT-RPC service. This is the main client
-   // interface.
-   connect: function (port, host, callback) {
-      var trace = BERTRPC.trace;
-      var socket = tcp.createConnection(port, host),
-      promises = [],
-      client = {
-         call: function (mod, fun, args, block) {
-            var packet = t(a('call'), a(mod), a(fun), args),
-                promise = new process.Promise();
-            trace("CLIENT", "<--", bert.repr(packet));
-            BERTRPC.write(socket, packet);
-            promise.finish = promise.addCallback;
-            if (block) { promise.finish(block) }
-            promises.push(promise);
-            return promise;
-         },
-
-         mod: function (mod) {
-            return {
-              call: function (fun, args, block) {
-                return client.call(mod, fun, args, block);
-              },
-              fun: function (fun) {
-                return function (args, block) {
-                  return client.call(mod, fun, args, block);
-                }
-              }
-            }
-         },
-
-         fun: function (mod, fun) {
-           return function (args, block) {
-             return client.call(mod, fun, args, block);
-           }
-         },
-
-         close: function () {
-           socket.close();
-         }
-      };
-
-      socket.addListener("connect", function () {
-         trace("CLIENT", "<--", "connected");
-         callback(client);
-      });
-
-      BERTRPC.read(socket, function (size, term) {
-         var reply = term[0],
-             value = term[1],
-             promise = promises.shift();
-         trace("CLIENT", "-->", bert.repr(term));
-         promise.emitSuccess(value);
-      });
-
-      socket.addListener("eof", function () {
-         var promise = null;
-         while (promise = promises.shift())
-           promise.emitError();
-      });
-
-      return client;
-   },
-
-   // Read BERPs off the wire and call the callback provided. The
-   // callback should accept size and term arguments, where size
-   // is the length of the BERT packet in bytes and term is the
-   // decoded object payload.
-   read: function (fd, callback) {
-      var size = null, buf = "";
-      fd.addListener("receive", function(data) {
-          buf += data;
-          while (size || buf.length >= 4) {
-             if (size == null) {
-                // read BERP length header and adjust buffer
-                size = bytes_to_int(buf, 4);
-                buf = buf.substring(4);
-             } else if (buf.length >= size) {
-                // TODO error handling
-                callback(size, bert.decode(buf.substring(0, size)));
-                buf = buf.substring(size);
-                size = null;
-             } else {
-                // nothing more we can do
-                break;
-             }
-          }
-      });
-   },
-
-   // Write the object specified by the second argument to the
-   // socket or file descriptor in the first argument. This
-   // BERT encodes the term and writes the result on the fd with
-   // a four byte BERP length header.
-   write: function (fd, term) {
-      var data = bert.encode(term);
-      fd.send(int_to_bytes(data.length, 4));
-      fd.send(data);
-      return data.length;
-   }
+Client.prototype.call = function(mod, fun, args, callback) {
+  var packet = bert.tuple(bert.atom('call'), bert.atom(mod), bert.atom(fun),
+                          args);
+  var data = bert.encode(packet);
+  this.callbacks.push(callback);
+  this.connection.write(bert.int_to_bytes(data.length, 4));
+  this.connection.write(data);
 };
 
-process.mixin(exports, BERTRPC);
+Client.prototype.mod = function(mod) {
+  var self = this;
+  return {
+    call: function(fun, args, callback) {
+      self.call(mod, fun, args, callback);
+    }
+  };
+};
+
+Client.prototype.close = function() {
+  this.connection.close();
+};
+
+// Server
+
+function Server(port, host) {
+  var self = this;
+
+  this.port = port;
+  this.host = host;
+  this.modules = [];
+
+  this.connection = tcp.createServer(function(connection) {
+    connection.setEncoding('binary');
+    connection.reader = new Reader(function(size, term) {
+      var type = term[0].toString();
+      var mod = term[1].toString();
+      var fun = term[2].toString();
+      var args = term[3];
+      var result = self.dispatch(type, mod, fun, args);
+      var packet = bert.tuple(bert.atom('reply'), result);
+      var data = bert.encode(packet);
+      connection.write(bert.int_to_bytes(data.length, 4));
+      connection.write(data);
+      self.emit('remote_invocation', type, mod, fun, args, result);
+    });
+
+    connection.addListener('data', function(data) {
+      this.reader.read(data);
+    });
+
+    connection.addListener('end', function() {
+      self.emit('client_disconnected');
+      connection.close();
+    });
+
+    self.emit('client_connected');
+  });
+};
+sys.inherits(Server, process.EventEmitter);
+
+Server.prototype.listen = function() {
+  this.connection.listen(this.port, this.host);
+};
+
+Server.prototype.expose = function(mod, obj) {
+  var funs = [];
+  for (var fun in obj) {
+    if (typeof(obj[fun]) == 'function')
+      funs.push(fun);
+  }
+  this.modules[mod] = obj;
+  return obj;
+};
+
+Server.prototype.dispatch = function(type, mod, fun, args) {
+  if (module = this.modules[mod]) {
+    if (fun = module[fun]) {
+      if (fun.apply) {
+        return fun.apply(module, args);
+      } else {
+        throw 'no such fun';
+      }
+    } else {
+      throw 'no such fun'
+    }
+  } else {
+    throw 'no such module'
+  }
+};
+
+Server.prototype.close = function() {
+  this.connection.close();
+};
+
+// Buffered Reader
+
+function Reader(callback) {
+  this.buf = "";
+  this.size = null;
+  this.callback = callback;
+}
+
+Reader.prototype.read = function(data) {
+  this.buf += data;
+  while (this.size || this.buf.length >= 4) {
+    if (this.size == null) {
+      this.size = bert.bytes_to_int(this.buf, 4);
+      this.buf = this.buf.substring(4);
+    } else if (this.buf.length >= this.size) {
+      this.callback(this.size, bert.decode(this.buf.substring(0, this.size)));
+      this.buf = this.buf.substring(this.size);
+      this.size = null;
+    } else {
+      break;
+    }
+  }
+};
+
+// External Interface
+
+exports.createServer = function(host, port) {
+  return new Server(host, port);
+};
+
+exports.connect = function(host, port, callback) {
+  return new Client(host, port, callback);
+};
 
 // vim: ts=2 sw=2 expandtab

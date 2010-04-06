@@ -9,10 +9,10 @@ rpc.connect(7001, 'localhost', function (service) {
 
    // call the math module's sum function with a few integers
    // and print the result
-   sys.debug("math client summing [1, 2, 3]");
-   mathrpc.call('sum', [[1, 2, 3]], function (result) {
+   mathrpc.call('sum', [[1, 2, 3]], function(result) {
        sys.debug("math client got: " + sys.inspect(result));
    });
+   sys.debug("math client summing [1, 2, 3]");
 
    // calculate a fibonacci number and pass the result to
    // the callback provided.
@@ -24,14 +24,15 @@ rpc.connect(7001, 'localhost', function (service) {
      } else {
        fib(num - 1, function(n1) {
          fib(num - 2, function(n2) {
-           mathrpc.call('sum', [[n1, n2]], callback);
+           mathrpc('sum', [[n1, n2]], callback);
          });
        });
      }
    }
 
    // calculate the 25th fibonacci number
-   fib(25, function (number) {
+   fib(2, function (number) {
      sys.debug("the 25th fibonacci number is " + number);
+     service.close();
    });
 });
