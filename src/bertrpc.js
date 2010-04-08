@@ -16,7 +16,7 @@
 
 var sys = require('sys'),
     events = require('events'),
-    tcp = require('tcp'),
+    tcp = require('net'),
     bert = require('./bert');
 
 // Client
@@ -26,7 +26,6 @@ function Client(port, host, callback) {
 
   this.connection = tcp.createConnection(port, host);
   this.callbacks = [];
-  this.connection.setEncoding('binary');
   this.reader = new Reader(function(size, term) {
     var callback = self.callbacks.shift();
     var reply = term[0];
@@ -80,7 +79,6 @@ function Server(port, host) {
   this.modules = [];
 
   this.connection = tcp.createServer(function(connection) {
-    connection.setEncoding('binary');
     connection.reader = new Reader(function(size, term) {
       var type = term[0].toString();
       var mod = term[1].toString();
@@ -95,7 +93,7 @@ function Server(port, host) {
     });
 
     connection.addListener('data', function(data) {
-      this.reader.read(data);
+      connection.reader.read(data);
     });
 
     connection.addListener('end', function() {
@@ -157,7 +155,8 @@ Reader.prototype.read = function(data) {
       this.size = bert.bytes_to_int(this.buf, 4);
       this.buf = this.buf.substring(4);
     } else if (this.buf.length >= this.size) {
-      this.callback(this.size, bert.decode(this.buf.substring(0, this.size)));
+      var term = bert.decode(this.buf.substring(0, this.size));
+      this.callback(this.size, term);
       this.buf = this.buf.substring(this.size);
       this.size = null;
     } else {
